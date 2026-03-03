@@ -127,11 +127,17 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const analyticsEnabled =
+    !!process.env.NEXT_PUBLIC_GA_ID &&
+    process.env.NEXT_PUBLIC_ENABLE_ANALYTICS !== "false";
+  const cookieBannerEnabled =
+    process.env.NEXT_PUBLIC_ENABLE_COOKIE_BANNER !== "false";
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         {/* Google Analytics */}
-        {process.env.NEXT_PUBLIC_GA_ID && (
+        {analyticsEnabled && (
           <GoogleAnalytics gtagId={process.env.NEXT_PUBLIC_GA_ID} />
         )}
         
@@ -159,7 +165,7 @@ export default function RootLayout({
           <Toaster />
           
           {/* Cookie Consent Banner */}
-          <CookieConsent />
+          {cookieBannerEnabled && <CookieConsent />}
         </ThemeProvider>
       </body>
     </html>

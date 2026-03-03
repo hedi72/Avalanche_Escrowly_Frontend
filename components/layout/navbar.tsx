@@ -10,6 +10,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { useTheme } from '@/components/ui/theme-provider';
+import { useToast } from '@/hooks/use-toast';
+import { useCoreWallet } from '@/hooks/use-core-wallet';
+import { DEFAULT_NETWORK } from '@/lib/avalanche/config';
 import { UsersApi, type Notification } from '@/lib/api/users';
 import {
   DropdownMenu,
@@ -50,13 +53,15 @@ import {
   Star,
   Zap,
   Award,
-  Gift
+  Gift,
+  Shield
 } from 'lucide-react';
 import { useSession } from 'next-auth/react';
 
 const navigation = [
   { name: 'Home', href: '/', icon: BarChart3, description: 'Your unified dashboard with quests, progress, and stats' },
   { name: 'Leaderboard', href: '/leaderboard', icon: Users, description: 'See top performers' },
+  { name: 'Escrow debug', href: '/escrow', icon: Shield, description: 'Create and manage escrow campaigns' },
   { name: 'Rewards', href: '/rewards', icon: Gift, description: 'View your reward points and redemption options' },
   { name: 'Profile', href: '/profile', icon: User, description: 'Manage your account' },
 ];
@@ -69,6 +74,16 @@ export function Navbar({ className }: NavbarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { theme, setTheme } = useTheme();
+  const { toast } = useToast();
+  const {
+    isInstalled,
+    isConnecting,
+    account,
+    chainId,
+    connect,
+    ensureNetwork,
+    disconnect,
+  } = useCoreWallet();
   const { user, logout } = useStore();
   const [isOpen, setIsOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -105,6 +120,90 @@ export function Navbar({ className }: NavbarProps) {
   const handleLogout = () => {
     logout();
     router.push('/');
+  };
+
+  const networkMismatch =
+    chainId !== null && chainId !== DEFAULT_NETWORK.chainId;
+
+  const walletLabel = !isInstalled
+    ? 'INSTALL CORE'
+    : account
+      ? `${account.slice(0, 6)}...${account.slice(-4)}`
+      : 'CONNECT WALLET';
+
+  const networkLabel = DEFAULT_NETWORK.chainId === 43113 ? 'FUJI' : 'AVAX';
+
+  const handleWalletAction = async () => {
+    if (!isInstalled) {
+      toast({
+        title: 'Core Wallet not found',
+        description: 'Please install the Core Wallet extension to continue.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      if (!account) {
+        await connect();
+      }
+
+      if (networkMismatch) {
+        await ensureNetwork();
+      }
+    } catch (error) {
+      toast({
+        title: 'Wallet error',
+        description: (error as Error).message || 'Failed to connect wallet.',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      const result = await disconnect();
+      if (result.mode === 'revoked' && !result.stillConnected) {
+        toast({
+          title: 'Wallet disconnected',
+          description: 'Your wallet was disconnected from this site.',
+        });
+        return;
+      }
+
+      if (result.stillConnected) {
+        toast({
+          title: 'Wallet disconnected (local)',
+          description: 'We disconnected the UI. To fully revoke, disconnect in Core Wallet.',
+        });
+        return;
+      }
+
+      toast({
+        title: 'Wallet disconnected',
+        description: 'Your wallet was disconnected from this site.',
+      });
+    } catch (error) {
+      toast({
+        title: 'Wallet error',
+        description: (error as Error).message || 'Failed to disconnect wallet.',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleCopyAddress = async () => {
+    if (!account) return;
+    try {
+      await navigator.clipboard.writeText(account);
+      toast({ title: 'Address copied', description: account });
+    } catch {
+      toast({
+        title: 'Copy failed',
+        description: 'Unable to copy address.',
+        variant: 'destructive',
+      });
+    }
   };
 
   const getInitials = (name: string) => {
@@ -160,6 +259,72 @@ export function Navbar({ className }: NavbarProps) {
 
           {/* Right Side Actions */}
           <div className="flex items-center space-x-2">
+            {/* Core Wallet */}
+            <div className="hidden sm:flex items-center space-x-2">
+              {account ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={isConnecting}
+                      className="border-2 border-dashed border-purple-500/50 hover:border-cyan-500/50 hover:bg-gradient-to-r hover:from-purple-500/20 hover:to-cyan-500/20 font-mono text-slate-300 hover:text-slate-100"
+                      title="[CORE_WALLET]"
+                    >
+                      {walletLabel}
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="end"
+                    className="w-56 border-2 border-dashed border-purple-500/50 bg-slate-800 text-slate-100 font-mono"
+                  >
+                    <DropdownMenuLabel className="font-mono">[CORE_WALLET]</DropdownMenuLabel>
+                    <DropdownMenuSeparator className="border-dashed border-purple-500/30" />
+                    <DropdownMenuItem className="text-xs text-muted-foreground cursor-default">
+                      {account}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleCopyAddress} className="cursor-pointer">
+                      [COPY_ADDRESS]
+                    </DropdownMenuItem>
+                    {networkMismatch && (
+                      <DropdownMenuItem onClick={ensureNetwork} className="cursor-pointer">
+                        [SWITCH_{networkLabel}]
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuSeparator className="border-dashed border-purple-500/30" />
+                    <DropdownMenuItem
+                      onClick={handleDisconnect}
+                      className="cursor-pointer text-red-500 focus:text-red-500"
+                    >
+                      [DISCONNECT]
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleWalletAction}
+                  disabled={isConnecting}
+                  className="border-2 border-dashed border-purple-500/50 hover:border-cyan-500/50 hover:bg-gradient-to-r hover:from-purple-500/20 hover:to-cyan-500/20 font-mono text-slate-300 hover:text-slate-100"
+                  title="[CORE_WALLET]"
+                >
+                  {walletLabel}
+                </Button>
+              )}
+              {account && (
+                <Badge
+                  className={cn(
+                    'border border-dashed font-mono text-xs',
+                    networkMismatch
+                      ? 'bg-red-500/20 text-red-400 border-red-500/50'
+                      : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+                  )}
+                >
+                  {networkMismatch ? 'WRONG NET' : networkLabel}
+                </Badge>
+              )}
+            </div>
             {/* Theme Toggle */}
             <Button
               variant="ghost"
@@ -330,6 +495,39 @@ export function Navbar({ className }: NavbarProps) {
                     [NAVIGATION]
                   </SheetTitle>
                 </SheetHeader>
+                <div className="mt-4 flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleWalletAction}
+                    disabled={isConnecting}
+                    className="border-2 border-dashed border-purple-500/50 hover:border-cyan-500/50 hover:bg-gradient-to-r hover:from-purple-500/20 hover:to-cyan-500/20 font-mono text-slate-300 hover:text-slate-100"
+                  >
+                    {walletLabel}
+                  </Button>
+                  {account && (
+                    <Badge
+                      className={cn(
+                        'border border-dashed font-mono text-xs',
+                        networkMismatch
+                          ? 'bg-red-500/20 text-red-400 border-red-500/50'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+                      )}
+                    >
+                      {networkMismatch ? 'WRONG NET' : networkLabel}
+                    </Badge>
+                  )}
+                </div>
+                {account && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleDisconnect}
+                    className="mt-2 border-2 border-dashed border-red-500/50 hover:border-red-400/80 hover:bg-red-500/10 font-mono text-red-400 hover:text-red-300"
+                  >
+                    [DISCONNECT]
+                  </Button>
+                )}
                 <div className="mt-6 space-y-2">
                   {navigation.map((item) => {
                     const isActive = pathname === item.href;

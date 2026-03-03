@@ -12,8 +12,9 @@ export function AnalyticsProvider({ children }: { children: React.ReactNode }) {
     const search = searchParams ? searchParams.toString() : '';
     const url = pathname + (search ? `?${search}` : '');
     const hasConsent = localStorage.getItem('analytics-consent') === 'true';
+    const analyticsEnabled = process.env.NEXT_PUBLIC_ENABLE_ANALYTICS !== 'false';
     
-    if (hasConsent && process.env.NEXT_PUBLIC_GA_ID) {
+    if (analyticsEnabled && hasConsent && process.env.NEXT_PUBLIC_GA_ID) {
       pageview(url);
     }
   }, [pathname, searchParams]);
