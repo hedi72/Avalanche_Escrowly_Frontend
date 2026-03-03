@@ -113,7 +113,7 @@ export function useCoreWallet(): CoreWalletState {
     await refreshState();
   }, [coreProvider, refreshState]);
 
-  const disconnect = useCallback(async () => {
+  const disconnect: CoreWalletState["disconnect"] = useCallback(async () => {
     if (!coreProvider) {
       throw new Error("Core Wallet not installed");
     }

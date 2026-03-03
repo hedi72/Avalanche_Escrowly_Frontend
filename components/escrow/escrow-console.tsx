@@ -332,7 +332,7 @@ export function EscrowConsole() {
       const fixedRewardAmount =
         payoutMode === 0
           ? parseUnits(createForm.fixedRewardAmount || "0", decimals)
-          : 0n;
+          : 0;
 
       const maxWinners = Number(createForm.maxWinners);
       if (!Number.isFinite(maxWinners) || maxWinners <= 0) {

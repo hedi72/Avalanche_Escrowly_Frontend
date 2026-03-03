@@ -127,9 +127,9 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const gtagId = process.env.NEXT_PUBLIC_GA_ID;
   const analyticsEnabled =
-    !!process.env.NEXT_PUBLIC_GA_ID &&
-    process.env.NEXT_PUBLIC_ENABLE_ANALYTICS !== "false";
+    !!gtagId && process.env.NEXT_PUBLIC_ENABLE_ANALYTICS !== "false";
   const cookieBannerEnabled =
     process.env.NEXT_PUBLIC_ENABLE_COOKIE_BANNER !== "false";
 
@@ -138,7 +138,7 @@ export default function RootLayout({
       <body className={inter.className}>
         {/* Google Analytics */}
         {analyticsEnabled && (
-          <GoogleAnalytics gtagId={process.env.NEXT_PUBLIC_GA_ID} />
+          <GoogleAnalytics gtagId={gtagId!} />
         )}
         
         <ThemeProvider defaultTheme="system" attribute="class" enableSystem disableTransitionOnChange>
