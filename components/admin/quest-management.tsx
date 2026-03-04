@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSession } from 'next-auth/react';
+import { JsonRpcProvider, formatUnits } from 'ethers';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,16 +18,30 @@ import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/hooks/use-toast';
 import { format, formatDistanceToNow } from 'date-fns';
-import { Search, Plus, MoreHorizontal, Eye, Edit, Play, Pause, XCircle, Trash2, Filter, Users, Calendar, Clock, Award, User, MapPin, Target, FileText, CheckCircle, AlertCircle, Compass, Trophy } from 'lucide-react';
+import { Search, Plus, MoreHorizontal, Eye, Edit, Play, Pause, XCircle, Trash2, Filter, Users, Calendar, Clock, Award, User, MapPin, Target, FileText, CheckCircle, AlertCircle, Compass, Trophy, ExternalLink, Loader2, Shield, Wallet } from 'lucide-react';
 import { QuestService } from '@/lib/services';
 import { CreateQuestForm } from '@/components/admin/create-quest-form';
 import { EditQuestForm } from '@/components/admin/edit-quest-form';
 import QuestDetailsModal from '@/components/admin/quest-details-modal';
 import type { Quest } from '@/lib/types';
+import { useCoreWallet } from '@/hooks/use-core-wallet';
+import { activateCampaign, CAMPAIGN_STATUS, readCampaignOverview } from '@/lib/avalanche/mvp';
+import { DEFAULT_NETWORK, DEFAULT_RPC_URL } from '@/lib/avalanche/config';
+
+const CAMPAIGN_STATUS_LABELS: Record<number, string> = {
+  [CAMPAIGN_STATUS.Created]: 'Created',
+  [CAMPAIGN_STATUS.Funded]: 'Funded',
+  [CAMPAIGN_STATUS.Active]: 'Active',
+  [CAMPAIGN_STATUS.Finalized]: 'Finalized',
+  [CAMPAIGN_STATUS.Cancelled]: 'Cancelled',
+  [CAMPAIGN_STATUS.Paused]: 'Paused',
+};
 
 function QuestManagement() {
   const { toast } = useToast();
   const { data: session } = useSession();
+  const { account, provider, connect, ensureNetwork, isInstalled } = useCoreWallet();
+  const fallbackProvider = useMemo(() => new JsonRpcProvider(DEFAULT_RPC_URL), []);
   const [quests, setQuests] = useState<Quest[]>([]);
   const [filteredQuests, setFilteredQuests] = useState<Quest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,16 +56,13 @@ function QuestManagement() {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [questToDelete, setQuestToDelete] = useState<string | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
+  const [campaignSnapshots, setCampaignSnapshots] = useState<Record<string, {
+    loading: boolean;
+    overview?: Awaited<ReturnType<typeof readCampaignOverview>>;
+    error?: string;
+  }>>({});
 
-  useEffect(() => {
-    loadQuests();
-  }, []);
-
-  useEffect(() => {
-    filterQuests();
-  }, [quests, searchTerm, selectedDifficulty]);
-
-  const loadQuests = async () => {
+  const loadQuests = useCallback(async () => {
     try {
       setLoading(true);
       const token = session?.user?.token;
@@ -66,9 +78,9 @@ function QuestManagement() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [session?.user?.token, toast]);
 
-  const filterQuests = () => {
+  const filterQuests = useCallback(() => {
     let filtered = quests;
 
     if (searchTerm) {
@@ -83,7 +95,73 @@ function QuestManagement() {
     }
 
     setFilteredQuests(filtered);
+  }, [quests, searchTerm, selectedDifficulty]);
+
+  const handleConnectSponsorWallet = async () => {
+    try {
+      await connect();
+      await ensureNetwork();
+      toast({
+        title: 'Core Wallet ready',
+        description: 'Sponsor wallet connected on Avalanche Fuji.',
+      });
+    } catch (error) {
+      toast({
+        title: 'Core Wallet',
+        description: error instanceof Error ? error.message : 'Could not connect Core Wallet.',
+        variant: 'destructive',
+      });
+    }
   };
+
+  useEffect(() => {
+    loadQuests();
+  }, [loadQuests]);
+
+  useEffect(() => {
+    filterQuests();
+  }, [filterQuests]);
+
+  useEffect(() => {
+    const onChainQuests = quests.filter((quest) => quest.campaignAddress);
+
+    if (onChainQuests.length === 0) {
+      setCampaignSnapshots({});
+      return;
+    }
+
+    const loadCampaignSnapshots = async () => {
+      const entries = await Promise.all(
+        onChainQuests.map(async (quest) => {
+          try {
+            const overview = await readCampaignOverview(fallbackProvider, quest.campaignAddress!);
+            return [String(quest.id), { loading: false, overview }] as const;
+          } catch (error) {
+            console.error('Failed to read campaign overview:', quest.id, error);
+            return [
+              String(quest.id),
+              {
+                loading: false,
+                error: error instanceof Error ? error.message : 'Failed to read campaign.',
+              },
+            ] as const;
+          }
+        })
+      );
+
+      setCampaignSnapshots(Object.fromEntries(entries));
+    };
+
+    setCampaignSnapshots((prev) => {
+      const next = { ...prev };
+      for (const quest of onChainQuests) {
+        next[String(quest.id)] = { ...(prev[String(quest.id)] || {}), loading: true };
+      }
+      return next;
+    });
+
+    void loadCampaignSnapshots();
+  }, [fallbackProvider, quests]);
 
   const handleDeleteQuest = async (questId: string) => {
     try {
@@ -116,6 +194,47 @@ function QuestManagement() {
       toast({
         title: 'Error',
         description: 'Failed to activate quest. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleActivateOnChainCampaign = async (quest: Quest) => {
+    if (!quest.campaignAddress) {
+      return;
+    }
+
+    if (!provider) {
+      toast({
+        title: 'Core Wallet required',
+        description: 'Connect the sponsor wallet before activating the campaign on-chain.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      await ensureNetwork();
+      const result = await activateCampaign(provider, quest.campaignAddress);
+
+      toast({
+        title: 'Campaign activated',
+        description: `On-chain activation submitted. Tx: ${result.txHash}`,
+      });
+
+      const overview = await readCampaignOverview(fallbackProvider, quest.campaignAddress);
+      setCampaignSnapshots((prev) => ({
+        ...prev,
+        [String(quest.id)]: {
+          loading: false,
+          overview,
+        },
+      }));
+    } catch (error) {
+      console.error('Failed to activate on-chain campaign:', error);
+      toast({
+        title: 'Activation failed',
+        description: error instanceof Error ? error.message : 'Could not activate the campaign on-chain.',
         variant: 'destructive',
       });
     }
@@ -434,6 +553,30 @@ function QuestManagement() {
             </Button>
           </div>
 
+          <div className="rounded-lg border border-dashed border-cyan-500/30 bg-gradient-to-r from-cyan-500/5 to-blue-500/5 p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 font-mono text-sm text-cyan-700 dark:text-cyan-300">
+                  <Shield className="w-4 h-4" />
+                  [SPONSOR_CAMPAIGN_DASHBOARD]
+                </div>
+                <div className="font-mono text-xs text-muted-foreground">
+                  Core Wallet: {isInstalled ? (account ? account : 'Installed, not connected') : 'Not installed'}
+                </div>
+              </div>
+              {!account && isInstalled && (
+                <Button
+                  variant="outline"
+                  onClick={handleConnectSponsorWallet}
+                  className="font-mono border-dashed border-cyan-500/30 text-cyan-700 hover:bg-cyan-500/10"
+                >
+                  <Wallet className="w-4 h-4 mr-2" />
+                  [CONNECT_SPONSOR_WALLET]
+                </Button>
+              )}
+            </div>
+          </div>
+
           {/* Quests Table */}
           <div className="border-2 border-dashed border-cyan-500/20 rounded-lg overflow-hidden bg-gradient-to-br from-white/50 to-cyan-50/30 dark:from-gray-900/50 dark:to-cyan-900/10">
             <Table>
@@ -442,6 +585,7 @@ function QuestManagement() {
                   <TableHead className="font-mono font-semibold text-cyan-700 dark:text-cyan-300 py-4">[QUEST]</TableHead>
                   <TableHead className="font-mono font-semibold text-cyan-700 dark:text-cyan-300 py-4">[DIFFICULTY]</TableHead>
                   <TableHead className="font-mono font-semibold text-cyan-700 dark:text-cyan-300 py-4 min-w-[140px] bg-gradient-to-r from-cyan-500/20 to-blue-500/20 border-2 border-dashed border-cyan-500/40">[STATUS]</TableHead>
+                  <TableHead className="font-mono font-semibold text-cyan-700 dark:text-cyan-300 py-4">[CAMPAIGN]</TableHead>
                   <TableHead className="font-mono font-semibold text-cyan-700 dark:text-cyan-300 py-4">[REWARDS]</TableHead>
                   <TableHead className="font-mono font-semibold text-cyan-700 dark:text-cyan-300 py-4">[UPDATED]</TableHead>
                   <TableHead className="font-mono font-semibold text-cyan-700 dark:text-cyan-300 py-4 text-center">[ACTIONS]</TableHead>
@@ -449,6 +593,23 @@ function QuestManagement() {
               </TableHeader>
               <TableBody>
                 {filteredQuests.map((quest) => (
+                  (() => {
+                    const snapshot = campaignSnapshots[String(quest.id)];
+                    const overview = snapshot?.overview;
+                    const rewardDisplay = overview
+                      ? `${formatUnits(overview.fixedRewardAmount, overview.tokenDecimals)} ${overview.tokenSymbol}`
+                      : null;
+                    const availableDisplay = overview
+                      ? `${formatUnits(overview.availableBalance, overview.tokenDecimals)} ${overview.tokenSymbol}`
+                      : null;
+                    const canActivateOnChain =
+                      !!quest.campaignAddress &&
+                      !!overview &&
+                      overview.status === CAMPAIGN_STATUS.Funded &&
+                      !!account &&
+                      account.toLowerCase() === overview.sponsor.toLowerCase();
+
+                    return (
                   <TableRow key={quest.id} className="border-b border-dashed border-cyan-500/10 hover:bg-gradient-to-r hover:from-cyan-500/8 hover:to-blue-500/8 transition-all duration-200 group">
                     <TableCell className="py-4">
                       <div className="min-w-0">
@@ -460,6 +621,62 @@ function QuestManagement() {
                     </TableCell>
                     <TableCell className="py-4">{getDifficultyBadge(quest.difficulty)}</TableCell>
                     <TableCell className="py-4 min-w-[140px]">{getStatusBadge(quest.status, quest)}</TableCell>
+                    <TableCell className="py-4">
+                      {!quest.campaignAddress ? (
+                        <Badge variant="outline" className="font-mono text-xs">OFF_CHAIN_ONLY</Badge>
+                      ) : snapshot?.loading ? (
+                        <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Loading campaign...
+                        </div>
+                      ) : snapshot?.error ? (
+                        <div className="space-y-2">
+                          <Badge className="bg-red-500/10 text-red-600 border border-dashed border-red-500/30 font-mono text-xs">
+                            READ_FAILED
+                          </Badge>
+                          <p className="max-w-[220px] break-words font-mono text-[10px] text-red-500">{snapshot.error}</p>
+                        </div>
+                      ) : overview ? (
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge className="bg-red-500/10 text-red-600 border border-dashed border-red-500/30 font-mono text-xs">
+                              #{overview.campaignId}
+                            </Badge>
+                            <Badge variant="outline" className="font-mono text-xs">
+                              {CAMPAIGN_STATUS_LABELS[overview.status] ?? 'Unknown'}
+                            </Badge>
+                          </div>
+                          <div className="space-y-1 font-mono text-[11px] text-muted-foreground">
+                            <div>Reward: {rewardDisplay}</div>
+                            <div>Available: {availableDisplay}</div>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <a
+                              href={`${DEFAULT_NETWORK.blockExplorerUrls[0]}/address/${quest.campaignAddress}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 font-mono text-[11px] text-blue-600 hover:underline"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                              EXPLORER
+                            </a>
+                            {canActivateOnChain && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleActivateOnChainCampaign(quest)}
+                                className="h-7 border-dashed border-green-500/30 text-green-600 hover:bg-green-500/10 font-mono text-[11px]"
+                              >
+                                <Play className="w-3 h-3 mr-1" />
+                                ACTIVATE
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <Badge variant="outline" className="font-mono text-xs">PENDING_READ</Badge>
+                      )}
+                    </TableCell>
                     <TableCell className="py-4">
                       <div className="flex flex-col gap-2">
                         <div className="flex items-center gap-2 bg-gradient-to-r from-yellow-50 to-amber-50 dark:from-yellow-900/20 dark:to-amber-900/20 px-3 py-2 rounded-lg border border-dashed border-yellow-300/50">
@@ -542,6 +759,8 @@ function QuestManagement() {
                       </div>
                     </TableCell>
                   </TableRow>
+                    );
+                  })()
                 ))}
               </TableBody>
             </Table>

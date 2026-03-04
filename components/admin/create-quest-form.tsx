@@ -3,6 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { Loader2, AlertCircle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { BasicInformationForm } from "./create-quest-components/basic-information-form";
 import { QuestDetailsForm } from "./create-quest-components/quest-details-form";
 import { RewardsForm } from "./create-quest-components/rewards-form";
@@ -48,6 +49,14 @@ export function CreateQuestForm({ onSuccess, onCancel }: CreateQuestFormProps) {
     onSubmit,
     setValue,
     watch,
+    rewardTokenAddress,
+    account,
+    chainId,
+    expectedChainId,
+    isCoreWalletInstalled,
+    isWalletConnected,
+    connectWallet,
+    ensureWalletNetwork,
   } = useCreateQuestForm(onSuccess);
 
   return (
@@ -60,6 +69,30 @@ export function CreateQuestForm({ onSuccess, onCancel }: CreateQuestFormProps) {
       </div> */}
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-8">
+        <Alert>
+          <AlertDescription className="space-y-3 font-mono text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">Core Wallet {isCoreWalletInstalled ? "installed" : "missing"}</Badge>
+              <Badge variant="outline">{isWalletConnected ? "wallet connected" : "wallet not connected"}</Badge>
+              <Badge variant="outline">reward token: {rewardTokenAddress || "missing"}</Badge>
+              <Badge variant="outline">chain: {chainId ?? "not connected"} / expected {expectedChainId}</Badge>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => void connectWallet()}>
+                Connect Core Wallet
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => void ensureWalletNetwork()}>
+                Switch To Fuji
+              </Button>
+            </div>
+            <div className="break-all text-muted-foreground">
+              Sponsor wallet: {account ?? "Not connected"}
+            </div>
+            <div className="text-muted-foreground">
+              The MVP create flow will deploy the campaign on Avalanche, save the campaign mapping in the backend, fund escrow, and trigger activation directly when the quest is created as active. For immediate activation, use a start time that is now or in the past.
+            </div>
+          </AlertDescription>
+        </Alert>
         <BasicInformationForm register={register} watch={watch} setValue={setValue} />
         <QuestDetailsForm
           register={register}

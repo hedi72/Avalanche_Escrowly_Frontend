@@ -62,6 +62,25 @@ export const QuestsApi = {
     interaction_type?: string;
     quest_link?: string;
     event_id?: number;
+    channel_id?: string;
+    quest_type?: string;
+    progress_to_add?: number;
+    createdBy?: number;
+    added_by?: number;
+    steps?: string[];
+    manual_submission?: boolean;
+    with_evidence?: boolean;
+    requires_attachment?: boolean;
+    featured?: boolean;
+    campaignId?: string | number;
+    campaignAddress?: string;
+    rewardTokenAddress?: string;
+    verificationMode?: string;
+    payoutMode?: string;
+    fixedRewardAmount?: string;
+    totalBudget?: string;
+    rulesHash?: string;
+    verifierGroupId?: string;
   }, token?: string): Promise<Quest> {
     console.log("Creating quest with payload:", payload);
 
@@ -90,6 +109,28 @@ export const QuestsApi = {
       endDate?: string;
       maxParticipants?: number;
       badgeIds?: number[];
+      platform_type?: string;
+      interaction_type?: string;
+      quest_link?: string;
+      event_id?: number | null;
+      quest_type?: string;
+      progress_to_add?: number;
+      createdBy?: number;
+      added_by?: number;
+      steps?: string[];
+      manual_submission?: boolean;
+      with_evidence?: boolean;
+      requires_attachment?: boolean;
+      featured?: boolean;
+      campaignId?: string | number;
+      campaignAddress?: string;
+      rewardTokenAddress?: string;
+      verificationMode?: string;
+      payoutMode?: string;
+      fixedRewardAmount?: string;
+      totalBudget?: string;
+      rulesHash?: string;
+      verifierGroupId?: string;
     },
     token?: string
   ): Promise<Quest> {
@@ -142,5 +183,13 @@ export const QuestsApi = {
 
     // Fallback response
     return { success: true, message: "Quest deleted successfully" };
+  },
+  async finalizeDirectClaims(
+    id: string,
+    token?: string
+  ): Promise<{ success: boolean; message: string; txHash?: string; campaignAddress?: string }> {
+    const apiClient = token ? createApiClientWithToken(token) : require("./client").api;
+    const response = await apiClient.post(`/quests/${id}/finalize-direct-claims`);
+    return response.data;
   },
 };

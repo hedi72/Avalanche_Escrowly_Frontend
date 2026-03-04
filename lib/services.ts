@@ -1,4 +1,6 @@
 import {
+  ClaimableCampaign,
+  EvmWalletResponse,
   User,
   Quest,
   Submission,
@@ -14,6 +16,7 @@ import {
   Wallet,
   WalletsResponse,
   VerifyWalletResponse,
+  ReviewSubmissionResponse,
 } from "./types";
 import { AuthService as ApiAuth } from "./api/auth";
 import { QuestsApi } from "./api/quests";
@@ -115,6 +118,7 @@ export class QuestService {
         email_verified: userData.email_verified,
         hederaProfile: userData.hederaProfile,
         referral_code: userData.referral_code,
+        evm_wallet_address: userData.evm_wallet_address ?? null,
       };
 
       return user;
@@ -192,6 +196,25 @@ export class QuestService {
     interaction_type?: string;
     quest_link?: string;
     event_id?: number;
+    channel_id?: string;
+    quest_type?: string;
+    progress_to_add?: number;
+    createdBy?: number;
+    added_by?: number;
+    steps?: string[];
+    manual_submission?: boolean;
+    with_evidence?: boolean;
+    requires_attachment?: boolean;
+    featured?: boolean;
+    campaignId?: string | number;
+    campaignAddress?: string;
+    rewardTokenAddress?: string;
+    verificationMode?: string;
+    payoutMode?: string;
+    fixedRewardAmount?: string;
+    totalBudget?: string;
+    rulesHash?: string;
+    verifierGroupId?: string;
   }, token?: string): Promise<Quest> {
     try {
       const response = await QuestsApi.create(quest, token);
@@ -345,19 +368,45 @@ export class QuestService {
     status: "approved" | "rejected" | "needs-revision",
     rejectionReason?: string,
     points?: number,
-    token?: string
-  ): Promise<Submission> {
+    token?: string,
+    options?: {
+      approveOnChain?: boolean;
+      rewardAmountAtomic?: string;
+      winnerWallet?: string;
+    },
+  ): Promise<ReviewSubmissionResponse | Submission> {
     try {
       const response = await SubmissionsApi.review(submissionId, {
         status,
         rejectionReason,
         points,
+        approveOnChain: options?.approveOnChain,
+        rewardAmountAtomic: options?.rewardAmountAtomic,
+        winnerWallet: options?.winnerWallet,
       }, token);
+      if ((response as ReviewSubmissionResponse).data) {
+        return response as ReviewSubmissionResponse;
+      }
       return {
-        ...response,
-        id: String(response.id),
-        submittedAt: response.submittedAt || (response as any).created_at,
+        ...(response as Submission),
+        id: String((response as Submission).id),
+        submittedAt: (response as Submission).submittedAt || (response as any).created_at,
       };
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  static async retryOnChainApproval(
+    submissionId: string,
+    options?: {
+      rewardAmountAtomic?: string;
+      winnerWallet?: string;
+    },
+    token?: string
+  ): Promise<ReviewSubmissionResponse> {
+    try {
+      return await SubmissionsApi.retryOnChainApproval(submissionId, options, token);
     } catch (error) {
       throw error;
     }
@@ -631,6 +680,43 @@ export class QuestService {
       return response;
     } catch (error) {
       console.error("Error fetching referral profile:", error);
+      throw error;
+    }
+  }
+
+  static async updateEvmWallet(walletAddress: string, token?: string): Promise<EvmWalletResponse> {
+    try {
+      return await UsersApi.updateEvmWallet(walletAddress, token);
+    } catch (error) {
+      console.error("Error updating EVM wallet:", error);
+      throw error;
+    }
+  }
+
+  static async getEvmWallet(token?: string): Promise<EvmWalletResponse> {
+    try {
+      return await UsersApi.getEvmWallet(token);
+    } catch (error) {
+      console.error("Error fetching EVM wallet:", error);
+      throw error;
+    }
+  }
+
+  static async getClaimableCampaigns(token?: string): Promise<ClaimableCampaign[]> {
+    try {
+      const response = await UsersApi.getClaimableCampaigns(token);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching claimable campaigns:", error);
+      throw error;
+    }
+  }
+
+  static async finalizeDirectClaims(questId: string, token?: string) {
+    try {
+      return await QuestsApi.finalizeDirectClaims(questId, token);
+    } catch (error) {
+      console.error("Error finalizing direct claims:", error);
       throw error;
     }
   }

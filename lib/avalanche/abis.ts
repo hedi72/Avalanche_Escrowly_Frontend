@@ -10,7 +10,10 @@ export const CAMPAIGN_ABI = [
   "function status() view returns (uint8)",
   "function sponsor() view returns (address)",
   "function config() view returns (tuple(address sponsor,address rewardToken,uint256 totalBudget,uint256 fixedRewardAmount,uint64 startAt,uint64 endAt,uint32 maxWinners,uint16 protocolFeeBps,uint8 verificationMode,uint8 payoutMode,bytes32 rulesHash,bytes32 eligibilityRoot,bytes32 verifierGroupId,bool proofNonTransferable))",
+  "function directApprovals(address) view returns (uint256 amount,bool exists)",
+  "function hasClaimed(address) view returns (bool)",
   "function fundCampaign()",
+  "function activate()",
   "function approveWinner(address claimant,uint256 amount)",
   "function claimDirect()",
   "function finalizeDirectClaims()",
@@ -28,4 +31,9 @@ export const ERC20_ABI = [
   "function balanceOf(address) view returns (uint256)",
   "function allowance(address owner,address spender) view returns (uint256)",
   "function approve(address spender,uint256 amount) returns (bool)",
+];
+
+export const PROOF1155_ABI = [
+  "function hasProof(address account,uint256 campaignId) view returns (bool)",
+  "function tokenIdByCampaign(uint256 campaignId) view returns (uint256)",
 ];

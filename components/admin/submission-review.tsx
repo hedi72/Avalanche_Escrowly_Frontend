@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Image from 'next/image';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -158,6 +159,10 @@ interface Submission {
     accountId?: string;
     transactionId?: string;
   };
+  approvalStatus?: 'pending' | 'submitted' | 'failed' | null;
+  approvalTxHash?: string | null;
+  approvalAmountAtomic?: string | null;
+  approvalErrorMessage?: string | null;
 }
 
 interface Quest {
@@ -168,6 +173,9 @@ interface Quest {
   completions?: Submission[];
   pendingCompletionsCount?: string | number; // Count of pending submissions from the optimized API
   totalSubmissions?: number; // Total submissions count
+  campaignAddress?: string | null;
+  fixedRewardAmount?: string | null;
+  verificationMode?: string | null;
 }
 
 interface QuestStats {
@@ -343,6 +351,10 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
           rejectionReason: submission.rejectionReason,
           evidence: submission.evidence,
           attachment: submission.attachment,
+          approvalStatus: submission.approvalStatus,
+          approvalTxHash: submission.approvalTxHash,
+          approvalAmountAtomic: submission.approvalAmountAtomic,
+          approvalErrorMessage: submission.approvalErrorMessage,
           score: submission.score,
           feedback: submission.rejectionReason,
           content: submission.content,
@@ -584,66 +596,160 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
     await handleReviewSubmission(submissionId, status, feedback, status === 'approved' ? 100 : 0);
   };
 
-  const handleReviewSubmission = async (submissionId: string, status: 'approved' | 'rejected' | 'needs-revision', feedback: string, score: number) => {
+  const updateSubmissionState = (submissionId: string, updates: Partial<Submission>) => {
+    setSubmissions((prev) =>
+      prev.map((submission) =>
+        submission.id === submissionId ? { ...submission, ...updates } : submission
+      )
+    );
+
+    setQuestSubmissions((prev) =>
+      prev.map((submission) =>
+        submission.id === submissionId ? { ...submission, ...updates } : submission
+      )
+    );
+  };
+
+  const handleRetryOnChainApproval = async (submissionId: string) => {
     try {
       setLoading(true);
+      const result = await QuestService.retryOnChainApproval(
+        submissionId,
+        {
+          rewardAmountAtomic: selectedQuest?.fixedRewardAmount || undefined,
+        },
+        session?.user?.token
+      );
+
+      updateSubmissionState(submissionId, {
+        approvalStatus: result.onChainApproval?.approvalStatus ?? null,
+        approvalTxHash: result.onChainApproval?.approvalTxHash ?? null,
+        approvalAmountAtomic: result.onChainApproval?.approvalAmountAtomic ?? null,
+        approvalErrorMessage: result.onChainApproval?.message ?? null,
+      });
+
+      toast({
+        title: result.success ? "On-chain approval submitted" : "On-chain approval failed",
+        description: result.message,
+        variant: result.success ? "default" : "destructive",
+      });
+    } catch (error: any) {
+      toast({
+        title: "Retry failed",
+        description: error.message || "Failed to retry on-chain approval.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFinalizeDirectClaims = async () => {
+    if (!selectedQuest) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const result = await QuestService.finalizeDirectClaims(String(selectedQuest.id), session?.user?.token);
+      toast({
+        title: "Direct claims finalized",
+        description: result.txHash
+          ? `Campaign finalized on-chain. Tx: ${result.txHash}`
+          : result.message || "Direct claims finalized successfully.",
+      });
+    } catch (error: any) {
+      toast({
+        title: "Finalize failed",
+        description: error.message || "Failed to finalize direct claims.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleReviewSubmission = async (submissionId: string, status: 'approved' | 'rejected' | 'needs-revision', feedback: string, score: number) => {
+    let loadingToast: { dismiss: () => void } | undefined;
+
+    try {
+      setLoading(true);
+
+      if (
+        status === 'approved' &&
+        selectedQuest?.campaignAddress &&
+        !selectedQuest.fixedRewardAmount
+      ) {
+        throw new Error("This quest has an on-chain campaign but no fixed reward amount.");
+      }
       
       // Show loading toast
-      const loadingToast = toast({
+      loadingToast = toast({
         title: "Processing Review...",
         description: "Please wait while we process the submission review.",
         variant: "default"
       });
       
-      // Call the API to review the submission
-      await QuestService.reviewSubmission(submissionId, status, feedback, score, session?.user?.token);
+      const response = await QuestService.reviewSubmission(
+        submissionId,
+        status,
+        feedback,
+        score,
+        session?.user?.token,
+        status === 'approved'
+          ? {
+              approveOnChain: true,
+              rewardAmountAtomic: selectedQuest?.fixedRewardAmount || undefined,
+            }
+          : undefined
+      );
       
       // Dismiss loading toast
       loadingToast.dismiss();
+      loadingToast = undefined;
       
       // Find the submission to get user and quest details for better toast messages
       const submission = submissions.find(s => s.id === submissionId) || 
                         questSubmissions.find(s => s.id === submissionId);
       
-      // Update local state for general submissions
-      setSubmissions(prev => prev.map(submission => {
-        if (submission.id === submissionId) {
-          return {
-            ...submission,
-            status,
-            feedback,
-            score,
-            reviewedAt: new Date().toISOString(),
-            reviewedBy: 'current_admin'
-          };
-        }
-        return submission;
-      }));
-      
-      // Update quest submissions state to refresh the table
-      setQuestSubmissions(prev => prev.map(submission => {
-        if (submission.id === submissionId) {
-          return {
-            ...submission,
-            status,
-            feedback,
-            score,
-            reviewedAt: new Date().toISOString(),
-            reviewedBy: 'current_admin'
-          };
-        }
-        return submission;
-      }));
+      const normalizedStatus: Submission['status'] = status === 'approved' ? 'validated' : status;
+      const approvalData = 'onChainApproval' in response ? response.onChainApproval : null;
+      const reviewSucceeded = 'success' in response ? response.success : true;
+      const reviewMessage = 'message' in response ? response.message : '';
+      const approvalMessage = approvalData?.message ?? null;
+
+      updateSubmissionState(submissionId, {
+        status: normalizedStatus,
+        feedback,
+        score,
+        reviewedAt: new Date().toISOString(),
+        reviewedBy: 'current_admin',
+        approvalStatus: approvalData?.approvalStatus ?? null,
+        approvalTxHash: approvalData?.approvalTxHash ?? null,
+        approvalAmountAtomic: approvalData?.approvalAmountAtomic ?? null,
+        approvalErrorMessage: approvalMessage,
+      });
       
       // Show appropriate success toast based on status
-      let toastTitle = "Review Completed";
-      let toastDescription = "";
+      let toastTitle = "Review completed";
+      let toastDescription = reviewMessage || "The review was saved successfully.";
+      let toastVariant: "default" | "destructive" = reviewSucceeded ? "default" : "destructive";
       
       if (status === 'approved') {
         toastTitle = "✅ Submission Approved";
         toastDescription = submission 
           ? `${submission.userName}'s submission for "${submission.questTitle}" has been approved and they've earned ${score} points!`
           : "Submission has been approved successfully.";
+        if (reviewSucceeded) {
+          toastTitle = "Submission validated";
+          toastDescription = approvalData?.approvalTxHash
+            ? `Validated and approved on-chain. Tx: ${approvalData.approvalTxHash}`
+            : reviewMessage || "Submission validated successfully.";
+        } else {
+          toastTitle = "Validated, on-chain approval failed";
+          toastDescription = approvalMessage || reviewMessage || "The submission was validated, but the on-chain approval failed.";
+          toastVariant = "destructive";
+        }
       } else if (status === 'rejected') {
         toastTitle = "❌ Submission Rejected";
         toastDescription = submission 
@@ -659,7 +765,7 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
       toast({
         title: toastTitle,
         description: toastDescription,
-        variant: "default",
+        variant: toastVariant,
       });
 
       // Refresh stats after successful review
@@ -675,13 +781,7 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
       }
       
     } catch (error: any) {
-      // Dismiss loading toast if it exists
-      const loadingToast = toast({
-        title: "Processing Review...",
-        description: "Please wait while we process the submission review.",
-        variant: "default"
-      });
-      loadingToast.dismiss();
+      loadingToast?.dismiss();
       
       console.error('Error reviewing submission:', error);
       
@@ -691,18 +791,21 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
                            error?.response?.data?.message || 
                            error?.data?.message ||
                            'Unknown error occurred';
-      let toastTitle = "Review Failed";
+      let toastTitle = "Review failed";
       let toastDescription = "Failed to submit review. Please try again.";
       
       if (errorMessage.toLowerCase().includes('network') || errorMessage.toLowerCase().includes('connection')) {
-        toastTitle = "Connection Error";
+        toastTitle = "Connection error";
         toastDescription = "Unable to submit review due to connection issues. Please check your internet and try again.";
       } else if (errorMessage.toLowerCase().includes('permission') || errorMessage.toLowerCase().includes('unauthorized')) {
-        toastTitle = "Permission Denied";
-        toastDescription = "You don't have permission to review this submission.";
+        toastTitle = "Permission denied";
+        toastDescription = "You do not have permission to review this submission.";
       } else if (errorMessage.toLowerCase().includes('not found')) {
-        toastTitle = "Submission Not Found";
+        toastTitle = "Submission not found";
         toastDescription = "The submission could not be found. It may have been deleted.";
+      } else if (errorMessage.toLowerCase().includes('fixed reward amount')) {
+        toastTitle = "Quest setup incomplete";
+        toastDescription = errorMessage;
       }
       
       toast({
@@ -726,6 +829,7 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'approved':
+      case 'validated':
         return <CheckCircle className="w-4 h-4 text-green-400" />;
       case 'rejected':
         return <XCircle className="w-4 h-4 text-red-400" />;
@@ -741,6 +845,7 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'approved':
+      case 'validated':
         return 'text-green-400 border-green-400';
       case 'rejected':
         return 'text-red-400 border-red-400';
@@ -750,6 +855,35 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
         return 'text-orange-400 border-orange-400';
       default:
         return 'text-gray-400 border-gray-400';
+    }
+  };
+
+  const getApprovalBadge = (approvalStatus?: Submission['approvalStatus']) => {
+    switch (approvalStatus) {
+      case 'submitted':
+        return (
+          <Badge className="bg-green-500/10 text-green-500 border border-dashed border-green-500/30 font-mono text-[10px]">
+            ON_CHAIN_SUBMITTED
+          </Badge>
+        );
+      case 'failed':
+        return (
+          <Badge className="bg-red-500/10 text-red-500 border border-dashed border-red-500/30 font-mono text-[10px]">
+            ON_CHAIN_FAILED
+          </Badge>
+        );
+      case 'pending':
+        return (
+          <Badge className="bg-yellow-500/10 text-yellow-500 border border-dashed border-yellow-500/30 font-mono text-[10px]">
+            ON_CHAIN_PENDING
+          </Badge>
+        );
+      default:
+        return (
+          <Badge variant="outline" className="font-mono text-[10px] border-dashed border-primary/30">
+            OFF_CHAIN_ONLY
+          </Badge>
+        );
     }
   };
 
@@ -795,6 +929,40 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
           </CardHeader>
           <CardContent>
             <p className="font-mono text-muted-foreground mb-4">{selectedQuest.description}</p>
+
+            {selectedQuest.campaignAddress && (
+              <div className="mb-4 rounded-lg border border-dashed border-primary/30 bg-gradient-to-r from-primary/5 to-blue-500/5 p-4">
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge className="bg-blue-500/10 text-blue-500 border border-dashed border-blue-500/30 font-mono">
+                        DIRECT_VERIFIER_CALL
+                      </Badge>
+                      {selectedQuest.fixedRewardAmount && (
+                        <Badge variant="outline" className="font-mono border-dashed border-primary/30">
+                          FIXED_REWARD: {selectedQuest.fixedRewardAmount}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="text-xs font-mono text-muted-foreground break-all">
+                      Campaign: {selectedQuest.campaignAddress}
+                    </div>
+                  </div>
+                  {selectedQuest.verificationMode === 'DirectVerifierCall' && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleFinalizeDirectClaims}
+                      disabled={loading}
+                      className="font-mono border-dashed border-primary/30 text-primary hover:bg-primary/10"
+                    >
+                      <Shield className="w-3 h-3 mr-1" />
+                      [FINALIZE_DIRECT_CLAIMS]
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
             
             {/* Manual Submission Indicator */}
             {selectedQuest.with_evidence && (
@@ -823,9 +991,9 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
                 </div>
               </div>
               <div className="bg-gradient-to-r from-green-500/10 to-emerald-500/10 p-3 rounded border border-dashed border-green-500/20">
-                <div className="text-muted-foreground">APPROVED:</div>
+                <div className="text-muted-foreground">VALIDATED:</div>
                 <div className="text-green-500 font-bold text-lg">
-                  {questStatsLoading ? '...' : (questStats?.validated ?? questSubmissions.filter(s => s.status === 'approved').length)}
+                  {questStatsLoading ? '...' : (questStats?.validated ?? questSubmissions.filter(s => s.status === 'validated').length)}
                 </div>
               </div>
               <div className="bg-gradient-to-r from-red-500/10 to-rose-500/10 p-3 rounded border border-dashed border-red-500/20">
@@ -986,7 +1154,26 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-2">
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {getApprovalBadge(submission.approvalStatus)}
+                            {submission.approvalTxHash && (
+                              <a
+                                href={`https://testnet.snowtrace.io/tx/${submission.approvalTxHash}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[10px] font-mono text-blue-500 underline"
+                              >
+                                VIEW_TX
+                              </a>
+                            )}
+                          </div>
+                          {submission.approvalErrorMessage && (
+                            <p className="text-xs font-mono text-red-500 break-words">
+                              {submission.approvalErrorMessage}
+                            </p>
+                          )}
+                          <div className="flex flex-wrap items-center gap-2">
                           <Button
                             size="sm"
                             variant="outline"
@@ -1007,6 +1194,18 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
                             <XCircle className="w-3 h-3 mr-1" />
                             [REJECT]
                           </Button>
+                          {submission.approvalStatus === 'failed' && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleRetryOnChainApproval(submission.id)}
+                              disabled={loading}
+                              className="bg-gradient-to-r from-amber-500/10 to-yellow-500/10 border border-dashed border-amber-500/30 text-amber-600 hover:bg-amber-500/20 font-mono text-xs"
+                            >
+                              <Loader2 className="w-3 h-3 mr-1" />
+                              [RETRY_ONCHAIN]
+                            </Button>
+                          )}
                           <Button
                             size="sm"
                             variant="outline"
@@ -1035,6 +1234,7 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
                               [DOWNLOAD]
                             </Button>
                           )}
+                          </div>
                         </div>
                       </TableCell>
                      
@@ -1234,7 +1434,7 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
                 onClick={() => selectedSubmission && handleReviewSubmission(selectedSubmission.id, 'approved', reviewFeedback, reviewScore)}
                 className="font-mono bg-gradient-to-r from-green-500 to-emerald-500"
               >
-                [APPROVE]
+                [VALIDATE]
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -1325,9 +1525,11 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
                             </div>
                           </div>
                           {selectedDetailSubmission.user.twitterProfile.twitter_profile_picture && (
-                            <img 
+                            <Image
                               src={selectedDetailSubmission.user.twitterProfile.twitter_profile_picture.trim()} 
                               alt="Twitter Profile" 
+                              width={32}
+                              height={32}
                               className="w-8 h-8 rounded-full border border-blue-300"
                             />
                           )}
@@ -1367,9 +1569,11 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
                             </div>
                           </div>
                           {selectedDetailSubmission.user.discordProfile.discord_picture && (
-                            <img 
+                            <Image
                               src={selectedDetailSubmission.user.discordProfile.discord_picture} 
                               alt="Discord Profile" 
+                              width={32}
+                              height={32}
                               className="w-8 h-8 rounded-full border border-indigo-300"
                             />
                           )}
@@ -1983,7 +2187,7 @@ export default function SubmissionReview({ className }: SubmissionReviewProps = 
               onClick={() => selectedSubmission && handleReviewSubmission(selectedSubmission.id, 'approved', reviewFeedback, reviewScore)}
               className="font-mono bg-gradient-to-r from-green-500 to-emerald-500"
             >
-              [APPROVE]
+              [VALIDATE]
             </Button>
           </DialogFooter>
         </DialogContent>

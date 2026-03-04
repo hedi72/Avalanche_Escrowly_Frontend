@@ -1,5 +1,5 @@
 import { createApiClientWithToken } from './client';
-import type { User, ReferralProfileResponse } from '@/lib/types';
+import type { ClaimableCampaign, EvmWalletResponse, User, ReferralProfileResponse } from '@/lib/types';
 
 export interface Notification {
   id: number;
@@ -78,7 +78,33 @@ export const UsersApi = {
     const apiClient = token ? createApiClientWithToken(token) : require('./client').api;
     const { data } = await apiClient.get(`/user/referral-profile?page=${page}&limit=${limit}`);
     return data;
-  }
+  },
+  async updateEvmWallet(walletAddress: string, token?: string): Promise<EvmWalletResponse> {
+    const apiClient = token ? createApiClientWithToken(token) : require('./client').api;
+    const { data } = await apiClient.put('/user/evm-wallet', {
+      walletAddress,
+      evm_wallet_address: walletAddress,
+    });
+    return {
+      success: data.success,
+      walletAddress: data.walletAddress ?? data.evm_wallet_address ?? null,
+    };
+  },
+  async getEvmWallet(token?: string): Promise<EvmWalletResponse> {
+    const apiClient = token ? createApiClientWithToken(token) : require('./client').api;
+    const { data } = await apiClient.get('/user/evm-wallet');
+    return {
+      success: data.success,
+      walletAddress: data.walletAddress ?? data.evm_wallet_address ?? null,
+    };
+  },
+  async getClaimableCampaigns(token?: string): Promise<{ success: boolean; data: ClaimableCampaign[] }> {
+    const apiClient = token ? createApiClientWithToken(token) : require('./client').api;
+    const { data } = await apiClient.get('/user/me/claimable-campaigns');
+    return {
+      success: data.success,
+      data: data.data ?? [],
+    };
+  },
 };
-
 

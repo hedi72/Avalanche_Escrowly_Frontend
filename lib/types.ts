@@ -35,6 +35,7 @@ export interface User {
   discordProfile?: any;
   email_verified?: boolean;
   referral_code?: string;
+  evm_wallet_address?: string | null;
   hederaProfile?: {
     id: number;
     hedera_id: string;
@@ -97,6 +98,15 @@ export interface Quest {
   with_evidence?: boolean;
   requires_attachment?: boolean;
   featured?: boolean;
+  campaignId?: string | number | null;
+  campaignAddress?: string | null;
+  rewardTokenAddress?: string | null;
+  verificationMode?: 'DirectVerifierCall' | 'EIP712Voucher' | 'MerkleRoot' | null;
+  payoutMode?: 'FixedPerWinner' | 'VariableClaim' | null;
+  fixedRewardAmount?: string | null;
+  totalBudget?: string | null;
+  rulesHash?: string | null;
+  verifierGroupId?: string | null;
 }
 
 export interface Submission {
@@ -111,6 +121,18 @@ export interface Submission {
   feedback?: string;
   points?: number;
   quest?: Quest;
+  user?: {
+    id?: string | number;
+    username?: string;
+    firstName?: string;
+    lastName?: string;
+    email?: string;
+    evm_wallet_address?: string | null;
+  };
+  approvalStatus?: 'pending' | 'submitted' | 'failed' | null;
+  approvalTxHash?: string | null;
+  approvalAmountAtomic?: string | null;
+  approvalErrorMessage?: string | null;
 }
 
 export interface Badge {
@@ -386,6 +408,46 @@ export interface Wallet {
   account_id: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface EvmWalletResponse {
+  success: boolean;
+  walletAddress: string | null;
+}
+
+export interface ClaimableCampaign {
+  completionId: number;
+  questId: number;
+  title: string;
+  campaignId: string | number | null;
+  campaignAddress: string;
+  rewardTokenAddress: string | null;
+  verificationMode: 'DirectVerifierCall' | 'EIP712Voucher' | 'MerkleRoot' | null;
+  payoutMode: 'FixedPerWinner' | 'VariableClaim' | null;
+  rewardAmountAtomic: string | null;
+  winnerWalletAddress: string | null;
+  approvalStatus: 'pending' | 'submitted' | 'failed' | null;
+  approvalTxHash: string | null;
+  approvalErrorMessage: string | null;
+  submissionStatus: SubmissionStatus | string;
+  validatedAt: string | null;
+}
+
+export interface ReviewSubmissionResponse {
+  success: boolean;
+  validationPersisted?: boolean;
+  data: Submission;
+  onChainApproval?: {
+    success: boolean;
+    campaignId?: string | number | null;
+    campaignAddress?: string;
+    winnerWalletAddress?: string | null;
+    approvalAmountAtomic?: string | null;
+    approvalTxHash?: string | null;
+    approvalStatus?: 'submitted' | 'failed';
+    message?: string;
+  } | null;
+  message: string;
 }
 
 export interface WalletsResponse {

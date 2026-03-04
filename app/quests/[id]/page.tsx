@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
 import DOMPurify from 'dompurify';
+import { JsonRpcProvider, formatUnits } from 'ethers';
 
 import { Quest, User } from '@/lib/types';
 import { QuestService } from '@/lib/services';
@@ -12,6 +13,9 @@ import { api, createApiClientWithToken } from '@/lib/api/client';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { SocialLinkModal } from '@/components/quests/social-link-modal';
+import { useCoreWallet } from '@/hooks/use-core-wallet';
+import { CAMPAIGN_STATUS, readCampaignOverview, readClaimStatus } from '@/lib/avalanche/mvp';
+import { DEFAULT_NETWORK, DEFAULT_RPC_URL } from '@/lib/avalanche/config';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -67,9 +71,10 @@ import {
   Upload,
   X,
   FileText,
-  Image,
+  Image as ImageIcon,
   UserPlus,
   RotateCcw,
+  Wallet,
 } from 'lucide-react';
 import { useSession } from 'next-auth/react';
 
@@ -86,10 +91,21 @@ const getCategoryIcon = (category: string) => {
   }
 };
 
+const CAMPAIGN_STATUS_LABELS: Record<number, string> = {
+  [CAMPAIGN_STATUS.Created]: 'Created',
+  [CAMPAIGN_STATUS.Funded]: 'Funded',
+  [CAMPAIGN_STATUS.Active]: 'Active',
+  [CAMPAIGN_STATUS.Finalized]: 'Finalized',
+  [CAMPAIGN_STATUS.Cancelled]: 'Cancelled',
+  [CAMPAIGN_STATUS.Paused]: 'Paused',
+};
+
 export default function QuestDetailPage() {
   const params = useParams();
   const questId = params?.id as string;
   const { toast } = useToast();
+  const { account, connect, ensureNetwork, isInstalled } = useCoreWallet();
+  const fallbackProvider = useMemo(() => new JsonRpcProvider(DEFAULT_RPC_URL), []);
 
   const [quest, setQuest] = useState<Quest | null>(null);
   const [user, setUser] = useState<User | null>(null);
@@ -119,7 +135,10 @@ export default function QuestDetailPage() {
     rejected: boolean;
     message?: string;
   } | null>(null);
-    const { data: session } = useSession();
+  const [isLoadingOnChain, setIsLoadingOnChain] = useState(false);
+  const [onChainOverview, setOnChainOverview] = useState<Awaited<ReturnType<typeof readCampaignOverview>> | null>(null);
+  const [claimStatus, setClaimStatus] = useState<Awaited<ReturnType<typeof readClaimStatus>> | null>(null);
+  const { data: session } = useSession();
 
   const now = new Date();
   
@@ -414,7 +433,43 @@ export default function QuestDetailPage() {
     if (questId) {
       loadData();
     }
-  }, [questId]);
+  }, [questId, session?.user?.token]);
+
+  useEffect(() => {
+    const loadOnChainState = async () => {
+      if (!quest?.campaignAddress) {
+        setOnChainOverview(null);
+        setClaimStatus(null);
+        setIsLoadingOnChain(false);
+        return;
+      }
+
+      try {
+        setIsLoadingOnChain(true);
+        const overview = await readCampaignOverview(fallbackProvider, quest.campaignAddress);
+        setOnChainOverview(overview);
+
+        if (user?.evm_wallet_address) {
+          const status = await readClaimStatus(
+            fallbackProvider,
+            quest.campaignAddress,
+            user.evm_wallet_address
+          );
+          setClaimStatus(status);
+        } else {
+          setClaimStatus(null);
+        }
+      } catch (onChainError) {
+        console.error('Failed to load on-chain campaign state:', onChainError);
+        setOnChainOverview(null);
+        setClaimStatus(null);
+      } finally {
+        setIsLoadingOnChain(false);
+      }
+    };
+
+    void loadOnChainState();
+  }, [fallbackProvider, quest?.campaignAddress, user?.evm_wallet_address]);
 
   const handleVerifyQuest = async () => {
     if (!quest || !session?.user?.token) return;
@@ -679,6 +734,23 @@ export default function QuestDetailPage() {
     setShowVerifyDialog(true);
   };
 
+  const handleConnectAvalancheWallet = async () => {
+    try {
+      await connect();
+      await ensureNetwork();
+      toast({
+        title: 'Core Wallet ready',
+        description: 'Your Avalanche wallet is connected on the expected network.',
+      });
+    } catch (walletError) {
+      toast({
+        title: 'Core Wallet',
+        description: walletError instanceof Error ? walletError.message : 'Could not connect Core Wallet.',
+        variant: 'destructive',
+      });
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh]">
@@ -699,6 +771,24 @@ export default function QuestDetailPage() {
   }
 
   const isCompleted = user?.completedQuests?.includes(String(quest.id)) || false;
+  const linkedWallet = user?.evm_wallet_address ?? null;
+  const linkedWalletMatchesConnectedWallet =
+    !!linkedWallet && !!account && linkedWallet.toLowerCase() === account.toLowerCase();
+  const claimWindowOpen =
+    !!onChainOverview &&
+    (onChainOverview.status === CAMPAIGN_STATUS.Active ||
+      onChainOverview.status === CAMPAIGN_STATUS.Finalized);
+  const readyToClaimOnChain =
+    !!claimStatus?.approvalExists && !claimStatus.hasClaimed && claimWindowOpen;
+  const fixedRewardDisplay = onChainOverview
+    ? `${formatUnits(onChainOverview.fixedRewardAmount, onChainOverview.tokenDecimals)} ${onChainOverview.tokenSymbol}`
+    : null;
+  const totalBudgetDisplay = onChainOverview
+    ? `${formatUnits(onChainOverview.totalBudget, onChainOverview.tokenDecimals)} ${onChainOverview.tokenSymbol}`
+    : null;
+  const paidDisplay = onChainOverview
+    ? `${formatUnits(onChainOverview.paid, onChainOverview.tokenDecimals)} ${onChainOverview.tokenSymbol}`
+    : null;
  
  
 
@@ -1021,7 +1111,7 @@ export default function QuestDetailPage() {
                               <div className="flex items-center gap-3">
                                 <div className="p-2 bg-green-100 dark:bg-green-900/30 rounded-lg">
                                   {attachmentFile.type.startsWith('image/') ? (
-                                    <Image className="w-5 h-5 text-green-600 dark:text-green-400" />
+                                    <ImageIcon className="w-5 h-5 text-green-600 dark:text-green-400" />
                                   ) : (
                                     <FileText className="w-5 h-5 text-green-600 dark:text-green-400" />
                                   )}
@@ -1655,6 +1745,151 @@ export default function QuestDetailPage() {
 
           {/* Sidebar */}
           <aside className="space-y-4 lg:space-y-6" aria-label="Quest Information Sidebar">
+            {quest.campaignAddress && (
+              <Card
+                className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-lg rounded-xl overflow-hidden"
+                role="region"
+                aria-labelledby="onchain-reward-title"
+              >
+                <CardHeader className="bg-gradient-to-r from-red-50 to-orange-50 dark:from-red-900/20 dark:to-orange-900/20 border-b border-gray-200 dark:border-gray-700 p-4 sm:p-6">
+                  <CardTitle id="onchain-reward-title" className="flex items-center gap-2 sm:gap-3 text-gray-900 dark:text-white">
+                    <div className="p-1.5 sm:p-2 bg-red-100 dark:bg-red-900/30 rounded-lg">
+                      <Shield className="w-5 h-5 sm:w-6 sm:h-6 text-red-600 dark:text-red-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-base sm:text-lg font-semibold">On-Chain Reward</h3>
+                      <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+                        Direct-verifier Avalanche campaign
+                      </p>
+                    </div>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 sm:p-6">
+                  {isLoadingOnChain ? (
+                    <div className="flex items-center justify-center py-6">
+                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap gap-2">
+                        <Badge className="bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800">
+                          DirectVerifierCall
+                        </Badge>
+                        <Badge variant="outline" className="font-mono text-xs">
+                          {onChainOverview ? CAMPAIGN_STATUS_LABELS[onChainOverview.status] ?? 'Unknown' : 'Pending read'}
+                        </Badge>
+                        {claimStatus?.hasProof && (
+                          <Badge className="bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 border border-green-200 dark:border-green-800">
+                            Proof minted
+                          </Badge>
+                        )}
+                      </div>
+
+                      <div className="space-y-3 text-sm">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-gray-500 dark:text-gray-400">Campaign address</span>
+                          <a
+                            href={`${DEFAULT_NETWORK.blockExplorerUrls[0]}/address/${quest.campaignAddress}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="max-w-[190px] truncate font-mono text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                          >
+                            {quest.campaignAddress}
+                          </a>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-gray-500 dark:text-gray-400">Fixed reward</span>
+                          <span className="font-semibold text-gray-900 dark:text-gray-100">{fixedRewardDisplay ?? 'Loading...'}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-gray-500 dark:text-gray-400">Budget / paid</span>
+                          <span className="font-semibold text-gray-900 dark:text-gray-100">
+                            {totalBudgetDisplay && paidDisplay ? `${paidDisplay} / ${totalBudgetDisplay}` : 'Loading...'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-gray-500 dark:text-gray-400">Linked wallet</span>
+                          <span className="max-w-[190px] truncate font-mono text-xs text-gray-900 dark:text-gray-100">
+                            {linkedWallet ?? 'Not linked'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-gray-500 dark:text-gray-400">Verifier approval</span>
+                          <span className="font-semibold text-gray-900 dark:text-gray-100">
+                            {claimStatus?.approvalExists ? 'Stored on-chain' : quest.user_status === 'validated' ? 'Waiting for verifier' : 'Not ready'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {linkedWallet && account && !linkedWalletMatchesConnectedWallet && (
+                        <Alert>
+                          <AlertCircle className="h-4 w-4" />
+                          <AlertDescription>
+                            Your connected Core Wallet does not match the Avalanche wallet linked to your profile.
+                          </AlertDescription>
+                        </Alert>
+                      )}
+
+                      {!linkedWallet && (
+                        <Alert>
+                          <Wallet className="h-4 w-4" />
+                          <AlertDescription>
+                            Link your Avalanche wallet before the verifier approves your reward so you can claim it later.
+                          </AlertDescription>
+                        </Alert>
+                      )}
+
+                      {readyToClaimOnChain ? (
+                        <Alert className="border-green-200 dark:border-green-800">
+                          <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
+                          <AlertDescription>
+                            Your reward is approved on-chain and ready to claim.
+                          </AlertDescription>
+                        </Alert>
+                      ) : claimStatus?.hasClaimed ? (
+                        <Alert className="border-green-200 dark:border-green-800">
+                          <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
+                          <AlertDescription>
+                            You already claimed this reward{claimStatus.hasProof ? ' and received the portable proof.' : '.'}
+                          </AlertDescription>
+                        </Alert>
+                      ) : quest.user_status === 'validated' ? (
+                        <Alert>
+                          <Clock className="h-4 w-4 text-yellow-600 dark:text-yellow-400" />
+                          <AlertDescription>
+                            Your off-chain submission is validated. The backend verifier still needs to submit `approveWinner(...)`.
+                          </AlertDescription>
+                        </Alert>
+                      ) : null}
+
+                      <div className="flex flex-wrap gap-2">
+                        {!account && isInstalled && (
+                          <Button variant="outline" onClick={handleConnectAvalancheWallet}>
+                            Connect Core Wallet
+                          </Button>
+                        )}
+                        <Button asChild>
+                          <Link href="/rewards">
+                            {readyToClaimOnChain ? 'Go To Claim' : linkedWallet ? 'Open Rewards' : 'Link Wallet In Rewards'}
+                          </Link>
+                        </Button>
+                        <Button variant="outline" asChild>
+                          <a
+                            href={`${DEFAULT_NETWORK.blockExplorerUrls[0]}/address/${quest.campaignAddress}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            <ExternalLink className="w-4 h-4 mr-2" />
+                            Explorer
+                          </a>
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
             {/* Quest Status Card */}
             <Card
               className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-lg rounded-xl overflow-hidden"

@@ -1,5 +1,5 @@
 import { createApiClientWithToken } from './client';
-import type { Submission, SubmissionContent } from '@/lib/types';
+import type { ReviewSubmissionResponse, Submission, SubmissionContent } from '@/lib/types';
 
 export const SubmissionsApi = {
   async list(params?: { questId?: string; userId?: string }, token?: string): Promise<Submission[]> {
@@ -47,9 +47,16 @@ export const SubmissionsApi = {
   },
   async review(
     submissionId: string,
-    payload: { status: 'approved' | 'rejected' | 'needs-revision'; rejectionReason?: string; points?: number },
+    payload: {
+      status: 'approved' | 'rejected' | 'needs-revision';
+      rejectionReason?: string;
+      points?: number;
+      approveOnChain?: boolean;
+      rewardAmountAtomic?: string;
+      winnerWallet?: string;
+    },
     token?: string
-  ): Promise<Submission> {
+  ): Promise<ReviewSubmissionResponse | Submission> {
     const apiClient = token ? createApiClientWithToken(token) : require('./client').api;
 
     // Use the correct endpoint and HTTP method based on the status
@@ -63,7 +70,10 @@ export const SubmissionsApi = {
       endpoint = `/quest-completions/completions/${submissionId}/validate`;
       requestPayload = {
         status: payload.status,
-        points: payload.points
+        points: payload.points,
+        approveOnChain: payload.approveOnChain ?? false,
+        rewardAmountAtomic: payload.rewardAmountAtomic ?? null,
+        winnerWallet: payload.winnerWallet ?? null,
       };
       response = await apiClient.put(endpoint, requestPayload);
     } else if (payload.status === 'rejected') {
@@ -87,6 +97,21 @@ export const SubmissionsApi = {
 
     return response.data;
   },
+  async retryOnChainApproval(
+    submissionId: string,
+    payload?: { rewardAmountAtomic?: string; winnerWallet?: string },
+    token?: string
+  ): Promise<ReviewSubmissionResponse> {
+    const apiClient = token ? createApiClientWithToken(token) : require('./client').api;
+    const { data } = await apiClient.post(
+      `/quest-completions/completions/${submissionId}/retry-onchain-approval`,
+      {
+        rewardAmountAtomic: payload?.rewardAmountAtomic ?? null,
+        winnerWallet: payload?.winnerWallet ?? null,
+      }
+    );
+    return data;
+  },
 
   async getStats(token?: string): Promise<{ success: boolean; data: { completed: number; pending: number; total: number; rejected: number } }> {
     const apiClient = token ? createApiClientWithToken(token) : require('./client').api;
@@ -94,5 +119,4 @@ export const SubmissionsApi = {
     return data;
   }
 };
-
 

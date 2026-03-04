@@ -13,6 +13,16 @@ const nextConfig = {
   compiler: {
     removeConsole: process.env.NODE_ENV === 'production',
   },
+  webpack: (config) => {
+    config.resolve = config.resolve || {};
+    config.resolve.fallback = {
+      ...(config.resolve.fallback || {}),
+      bufferutil: false,
+      "utf-8-validate": false,
+    };
+
+    return config;
+  },
   // Suppress hydration errors in development
   onDemandEntries: {
     // period (in ms) where the server will keep pages in the buffer

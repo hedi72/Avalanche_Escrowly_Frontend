@@ -5,6 +5,15 @@ import { Badge, Event } from "@/lib/types";
 import { useToast } from "@/hooks/use-toast";
 import DOMPurify from "dompurify";
 import { useSession } from "next-auth/react";
+import { useCoreWallet } from "@/hooks/use-core-wallet";
+import { DEFAULT_NETWORK } from "@/lib/avalanche/config";
+import {
+  CAMPAIGN_STATUS,
+  activateCampaign,
+  createDirectVerifierCampaign,
+  fundCampaign,
+  readCampaignOverview,
+} from "@/lib/avalanche/mvp";
 
 interface CreateQuestFormData {
   title: string;
@@ -31,6 +40,7 @@ interface CreateQuestFormData {
   with_evidence?: boolean;
   requires_attachment?: boolean;
   featured?: boolean;
+  rewardTokenAddress?: string;
 }
 
 // Input sanitization helper
@@ -63,6 +73,9 @@ export const useCreateQuestForm = (onSuccess?: () => void) => {
   const [progressToAdd, setProgressToAdd] = useState<number>(10);
   const [steps, setSteps] = useState<string[]>([]);
   const { data: session } = useSession();
+  const { provider, account, chainId, isInstalled, connect, ensureNetwork } = useCoreWallet();
+  const rewardTokenAddress = process.env.NEXT_PUBLIC_REWARD_TOKEN_ADDRESS?.trim() || "";
+  const verifierGroupId = process.env.NEXT_PUBLIC_VERIFIER_GROUP_ID?.trim() || "";
 
   const { toast } = useToast();
 
@@ -74,7 +87,11 @@ export const useCreateQuestForm = (onSuccess?: () => void) => {
     other: ["visit", "signup", "complete", "submit", "participate"],
   };
 
-  const { register, handleSubmit, setValue, watch } = useForm<CreateQuestFormData>();
+  const { register, handleSubmit, setValue, watch } = useForm<CreateQuestFormData>({
+    defaultValues: {
+      rewardTokenAddress,
+    },
+  });
 
   useEffect(() => {
     const fetchData = async () => {
@@ -98,13 +115,28 @@ export const useCreateQuestForm = (onSuccess?: () => void) => {
     };
 
     fetchData();
-  }, []);
+  }, [session?.user?.token]);
 
   const onSubmit = async (data: CreateQuestFormData) => {
     setIsLoading(true);
     setError(null);
 
     try {
+      if (!session?.user?.token) {
+        throw new Error("You must be logged in to create quests.");
+      }
+      if (!isInstalled) {
+        throw new Error("Core Wallet is required to create and fund the on-chain campaign.");
+      }
+      if (!rewardTokenAddress) {
+        throw new Error("NEXT_PUBLIC_REWARD_TOKEN_ADDRESS is missing from the frontend environment.");
+      }
+      if (!provider) {
+        throw new Error("Connect Core Wallet before creating a quest.");
+      }
+
+      await ensureNetwork();
+
       // Validate Discord channel ID requirement
       if (platform === "discord" && interactionType === "join" && !channelId.trim()) {
         setError("Channel ID is required when platform is Discord and interaction is Join");
@@ -158,16 +190,40 @@ export const useCreateQuestForm = (onSuccess?: () => void) => {
         return dateWithTime.toISOString().slice(0, 19);
       };
 
-      setValue("startDate", formatDateTime(startDate, startTime));
-      setValue("endDate", formatDateTime(endDate, endTime));
+      const formattedStartDate = formatDateTime(startDate, startTime);
+      const formattedEndDate = formatDateTime(endDate, endTime);
+      setValue("startDate", formattedStartDate);
+      setValue("endDate", formattedEndDate);
+
+      const rewardPerWinner = Number(data.reward || 0);
+      if (!rewardPerWinner || rewardPerWinner <= 0) {
+        throw new Error("Reward must be greater than zero for the MVP direct-verifier flow.");
+      }
+
+      const maxWinners = Number(data.maxParticipants || 1);
+      if (!Number.isFinite(maxWinners) || maxWinners <= 0) {
+        throw new Error("Max participants must be greater than zero because the MVP uses it as max winners.");
+      }
+
+      const startAtSeconds = Math.floor(new Date(formattedStartDate).getTime() / 1000);
+      const endAtSeconds = Math.floor(new Date(formattedEndDate).getTime() / 1000);
+      if (!Number.isFinite(startAtSeconds) || !Number.isFinite(endAtSeconds) || startAtSeconds >= endAtSeconds) {
+        throw new Error("Start date and end date are required and must form a valid window.");
+      }
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      if (status === "active" && startAtSeconds > nowSeconds) {
+        throw new Error(
+          "Active quests must use a start time that is now or in the past so the campaign can activate during the create flow."
+        );
+      }
 
       const questData = {
         ...data,
         title: sanitizeInput(data.title.trim()),
         description: sanitizeInput(data.description.trim()),
         status,
-        startDate: formatDateTime(startDate, startTime),
-        endDate: formatDateTime(endDate, endTime),
+        startDate: formattedStartDate,
+        endDate: formattedEndDate,
         maxParticipants: data.maxParticipants || undefined,
         currentParticipants: 0, // New quests start with 0 participants
         badgeIds: selectedBadges.length > 0 ? selectedBadges : undefined,
@@ -189,7 +245,50 @@ export const useCreateQuestForm = (onSuccess?: () => void) => {
         featured: data.featured || false, // Include the featured flag
       };
 
-      await QuestService.createQuest(questData, session?.user?.token);
+      const onChainCampaign = await createDirectVerifierCampaign(provider, {
+        rewardToken: rewardTokenAddress,
+        totalBudget: String(rewardPerWinner * maxWinners),
+        fixedRewardAmount: String(rewardPerWinner),
+        startAt: startAtSeconds,
+        endAt: endAtSeconds,
+        maxWinners,
+        rulesText: `${questData.title}\n${questData.description}`,
+        verifierGroupId,
+        proofNonTransferable: true,
+      });
+
+      await QuestService.createQuest(
+        {
+          ...questData,
+          campaignId: onChainCampaign.campaignId,
+          campaignAddress: onChainCampaign.campaignAddress,
+          rewardTokenAddress,
+          verificationMode: "DirectVerifierCall",
+          payoutMode: "FixedPerWinner",
+          fixedRewardAmount: onChainCampaign.fixedRewardAmountAtomic,
+          totalBudget: onChainCampaign.totalBudgetAtomic,
+          verifierGroupId: verifierGroupId || undefined,
+        },
+        session.user.token
+      );
+
+      const fundingResult = await fundCampaign(provider, onChainCampaign.campaignAddress);
+      let activationTxHash: string | null = null;
+      let activationSummary = "Campaign funded successfully.";
+      if (status === "active") {
+        const overviewAfterFunding = await readCampaignOverview(provider, onChainCampaign.campaignAddress);
+        if (overviewAfterFunding.status === CAMPAIGN_STATUS.Funded) {
+          const activationResult = await activateCampaign(provider, onChainCampaign.campaignAddress);
+          activationTxHash = activationResult.txHash;
+          activationSummary = "Campaign funded and activation submitted in the same create flow.";
+        } else if (overviewAfterFunding.status === CAMPAIGN_STATUS.Active) {
+          activationSummary = "Campaign was activated automatically during funding.";
+        } else {
+          throw new Error(
+            `Campaign was funded but did not reach an activatable state. Current status: ${overviewAfterFunding.status}.`
+          );
+        }
+      }
       
       // Dismiss loading toast
       loadingToast.dismiss();
@@ -210,7 +309,7 @@ export const useCreateQuestForm = (onSuccess?: () => void) => {
       
       toast({
         title: successTitle,
-        description: successDescription,
+        description: `${successDescription} Campaign #${onChainCampaign.campaignId} deployed at ${onChainCampaign.campaignAddress}. Funding tx: ${fundingResult.txHash}${activationTxHash ? ` | Activation tx: ${activationTxHash}` : ""} ${activationSummary}`,
         variant: "default"
       });
       
@@ -288,5 +387,13 @@ export const useCreateQuestForm = (onSuccess?: () => void) => {
     onSubmit,
     setValue,
     watch, 
+    rewardTokenAddress,
+    account,
+    chainId,
+    expectedChainId: DEFAULT_NETWORK.chainId,
+    isCoreWalletInstalled: isInstalled,
+    isWalletConnected: !!account,
+    connectWallet: connect,
+    ensureWalletNetwork: ensureNetwork,
   };
 };
